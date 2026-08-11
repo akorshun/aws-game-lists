@@ -36,6 +36,28 @@ EasyAntiCheat и Epic Online Services используются десяткам�
 
 Совпадение идёт по суффиксу, поэтому `epicgames.com` покрывает и `datarouter.ol.epicgames.com`, и `modules-cdn.eac-prod.on.epicgames.com`.
 
+### Оговорка для zapret, сборка Flowseal
+
+В её `lists/list-exclude.txt` уже лежат `epicgames.com` и `epicgames.dev`, а
+`--hostlist-exclude` приоритетнее `--hostlist`. Значит эти две записи из списка
+у вас работать не будут, даже если добавить их в `list-general-user.txt`.
+
+Ломать это не нужно. Исключение внесено осознанно, и по замерам эндпоинты Epic
+открываются без обхода. Для восстановления античита важны другие две записи —
+`easyanticheat.net` и `eac-cdn.com`: они живут не на AWS, в исключениях их нет,
+и именно они теряют покрытие при переходе с фильтра «любой IP» на список AWS.
+
+Если всё же нужно продавить Epic мимо исключения, добавьте отдельный блок
+**перед** общим (у zapret выигрывает первый совпавший профиль), без
+`--hostlist-exclude` в этой строке:
+
+```
+--filter-tcp=80,443 --hostlist-domains=epicgames.com,epicgames.dev --dpi-desync=multisplit --dpi-desync-split-seqovl=568 --dpi-desync-split-pos=1 --dpi-desync-split-seqovl-pattern="%BIN%tls_clienthello_4pda_to.bin" --new ^
+```
+
+На Podkop и прочую маршрутизацию оговорка не распространяется — там никаких
+списков исключений нет и все семь доменов работают.
+
 ## ⚠️ Важно: список сетей широкий
 
 Речь про `cidr_ipv4.txt` — это **весь публичный AWS**, а не только игровые серверы.
