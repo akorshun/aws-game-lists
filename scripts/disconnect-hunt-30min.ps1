@@ -163,6 +163,14 @@ function Test-Private { param([string]$ip)
   return ($ip -match '^(10\.|127\.|169\.254\.|192\.168\.|22[4-9]\.|23\d\.|255\.|0\.)' -or
           $ip -match '^172\.(1[6-9]|2\d|3[01])\.')
 }
+# Voice chat is high-volume UDP that looks exactly like a game flow and is not
+# on AWS, so without this it gets reported as an uncovered game server. These
+# are the Discord/STUN ranges the common zapret configs filter separately.
+function Test-KnownNonGame { param([int]$port)
+  return (($port -ge 19294 -and $port -le 19344) -or
+          ($port -ge 50000 -and $port -le 50100) -or
+          $port -eq 3478 -or $port -eq 3479)
+}
 $flow = @{}; $now = ''
 $fs = New-Object System.IO.FileStream($txt,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
 $sr = New-Object System.IO.StreamReader($fs)
@@ -186,11 +194,12 @@ Say "=== Game flows in time order (>=200 samples) ===" Cyan
 Say ""
 Say ("{0,-16} {1,-6} {2,-9} {3,-9} {4,9}  {5,-8} {6,-8} {7}" -f 'REMOTE IP','PORT','FIRST','LAST','SAMPLES','PORT-OK','IN-LIST','MATCHED CIDR')
 Say ("-" * 112)
-$rows = @()
+$rows = @(); $other = @()
 foreach ($k in $flow.Keys) {
   if ($flow[$k].n -lt 200) { continue }
   $p = $k -split '\|'
-  $rows += ,[pscustomobject]@{ Ip=$p[0]; Port=[int]$p[1]; First=$flow[$k].first; Last=$flow[$k].last; N=$flow[$k].n }
+  $row = [pscustomobject]@{ Ip=$p[0]; Port=[int]$p[1]; First=$flow[$k].first; Last=$flow[$k].last; N=$flow[$k].n }
+  if (Test-KnownNonGame $row.Port) { $other += ,$row } else { $rows += ,$row }
 }
 $bad = @()
 foreach ($r in ($rows | Sort-Object First)) {
@@ -200,6 +209,15 @@ foreach ($r in ($rows | Sort-Object First)) {
     $r.Ip, $r.Port, ($r.First -split ' ')[1], ($r.Last -split ' ')[1], $r.N,
     $(if($portOk){'yes'}else{'NO'}), $(if($cidr){'yes'}else{'NO'}), $(if($cidr){$cidr}else{'-- not in list --'}))
   if (-not $portOk -or -not $cidr) { $bad += ,$r }
+}
+
+if ($other.Count -gt 0) {
+  Say ""
+  Say "--- other UDP, not game traffic, excluded from the verdict ---"
+  foreach ($r in ($other | Sort-Object First)) {
+    Say ("{0,-16} {1,-6} {2,-9} {3,-9} {4,9}  voice/STUN port range" -f `
+      $r.Ip, $r.Port, ($r.First -split ' ')[1], ($r.Last -split ' ')[1], $r.N)
+  }
 }
 
 Say ""
