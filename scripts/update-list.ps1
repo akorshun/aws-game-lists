@@ -30,12 +30,16 @@ $ErrorActionPreference = 'Stop'
 $wanted  = 'AMAZON','EC2','GLOBALACCELERATOR'
 $results = Join-Path $OutDir 'results'
 $out     = Join-Path $results 'cidr_ipv4.txt'
-$tmp     = Join-Path $env:TEMP 'aws-ip-ranges.json'
+# GetTempPath, not $env:TEMP - that variable does not exist on Linux, so the
+# CI runner would die here.
+$tmp     = Join-Path ([System.IO.Path]::GetTempPath()) 'aws-ip-ranges.json'
 
 if (-not (Test-Path $results)) { New-Item -ItemType Directory -Force -Path $results | Out-Null }
 
 Write-Host "Fetching ip-ranges.json ..."
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Needed on Windows PowerShell 5.1, meaningless on .NET Core and able to throw
+# there - and ErrorActionPreference is Stop, so it must be swallowed.
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 Invoke-WebRequest -Uri 'https://ip-ranges.amazonaws.com/ip-ranges.json' -OutFile $tmp -UseBasicParsing -TimeoutSec 120
 
 $raw = Get-Content $tmp -Raw
