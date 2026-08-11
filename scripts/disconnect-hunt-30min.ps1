@@ -15,6 +15,13 @@
   Note the wall-clock time when you get kicked, then match it against the
   FIRST/LAST columns in the report.
 
+  Press any key to finish early - the capture stops, decodes and reports
+  normally. Do NOT use Ctrl+C for that: it kills the script before the decode
+  and you lose the report.
+
+  The report is written to a timestamped file next to the capture, so you can
+  reread it later. Paths are printed at the end.
+
 .PARAMETER Minutes
   Capture duration. Default 30.
 
@@ -26,6 +33,9 @@
   Only set these if you narrowed the UDP port range in your bypass config and
   want to verify that choice. Defaults cover everything, so PORT-OK stays yes.
 
+.PARAMETER KeepRaw
+  Keep the decoded text file. It is large; deleted by default.
+
 .EXAMPLE
   .\disconnect-hunt-30min.ps1
 .EXAMPLE
@@ -35,15 +45,17 @@ param(
   [int]$Minutes  = 30,
   [string]$Ipset,
   [int]$PortLow  = 1024,
-  [int]$PortHigh = 65535
+  [int]$PortHigh = 65535,
+  [switch]$KeepRaw
 )
 
 Set-StrictMode -Off
 $ErrorActionPreference = 'SilentlyContinue'
 
 $ListUrl = 'https://raw.githubusercontent.com/akorshun/aws-game-lists/main/results/cidr_ipv4.txt'
-$etl = Join-Path $env:TEMP 'gamehunt.etl'
-$txt = Join-Path $env:TEMP 'gamehunt.txt'
+$etl     = Join-Path $env:TEMP 'gamehunt.etl'
+$txt     = Join-Path $env:TEMP 'gamehunt.txt'
+$reportF = Join-Path $env:TEMP ("gamehunt-report-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   Write-Host "ERROR: run this in an elevated PowerShell (Run as administrator)." -ForegroundColor Red
@@ -54,11 +66,19 @@ if (-not (Get-Command pktmon.exe -ErrorAction SilentlyContinue)) {
   exit 1
 }
 
+# Report goes to the console AND into a file, so closing the window does not
+# throw away the verdict.
+$report = New-Object System.Collections.Generic.List[string]
+function Say { param([string]$Text = '', $Color)
+  if ($Color) { Write-Host $Text -ForegroundColor $Color } else { Write-Host $Text }
+  $report.Add($Text)
+}
+
 # ---------------- CIDR list ----------------
 if (-not $Ipset) {
   $Ipset = Join-Path $env:TEMP 'aws-game-cidr.txt'
   Write-Host "Downloading CIDR list ..."
-  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
   try { Invoke-WebRequest -Uri $ListUrl -OutFile $Ipset -UseBasicParsing -TimeoutSec 60 }
   catch { Write-Host "ERROR: could not download the list: $_" -ForegroundColor Red; exit 1 }
 }
@@ -83,31 +103,57 @@ function Get-Cidr { param([string]$ip)
   foreach ($x in $nets) { if (($n -band $x[1]) -eq $x[0]) { return $x[2] } }
   return $null
 }
-Write-Host "CIDR list : $($nets.Count) prefixes"
-Write-Host "port range under test: UDP $PortLow-$PortHigh"
-Write-Host ""
+Say "CIDR list : $($nets.Count) prefixes from $(Split-Path $Ipset -Leaf)"
+Say "ports under test: UDP $PortLow-$PortHigh"
+Say ""
 
 # ---------------- capture ----------------
-pktmon stop 2>$null | Out-Null
-pktmon filter remove | Out-Null
-pktmon filter add GAMEHUNT -t UDP | Out-Null
-# --comp nics cuts most per-component duplication. Virtual adapters still log
-# separately, so sample counts are relative, not exact packet counts.
-pktmon start --capture --comp nics --pkt-size 64 --file-name $etl --file-size 1024 | Out-Null
+# KeyAvailable throws when input is redirected, so probe it once up front.
+$canReadKey = $true
+try { $null = [Console]::KeyAvailable } catch { $canReadKey = $false }
 
-Write-Host "Capturing for $Minutes min. Play normally." -ForegroundColor Cyan
-Write-Host ">>> WRITE DOWN THE CLOCK TIME WHEN YOU GET KICKED. <<<" -ForegroundColor Yellow
-Write-Host ""
-$end = (Get-Date).AddMinutes($Minutes)
-while ((Get-Date) -lt $end) {
-  Write-Host ("  {0}   ~{1} min left    " -f (Get-Date -Format 'HH:mm:ss'), [int]($end - (Get-Date)).TotalMinutes) -NoNewline
-  Write-Host "`r" -NoNewline
-  Start-Sleep -Seconds 15
+$capturing = $false
+$stoppedEarly = $false
+try {
+  pktmon stop 2>$null | Out-Null
+  pktmon filter remove | Out-Null
+  pktmon filter add GAMEHUNT -t UDP | Out-Null
+  # --comp nics cuts most per-component duplication. Virtual adapters still log
+  # separately, so sample counts are relative, not exact packet counts.
+  pktmon start --capture --comp nics --pkt-size 64 --file-name $etl --file-size 1024 | Out-Null
+  $capturing = $true
+
+  Write-Host "Capturing for $Minutes min. Play normally." -ForegroundColor Cyan
+  Write-Host ">>> WRITE DOWN THE CLOCK TIME WHEN YOU GET KICKED. <<<" -ForegroundColor Yellow
+  if ($canReadKey) {
+    Write-Host "    Press any key to finish early and get the report." -ForegroundColor DarkGray
+  }
+  Write-Host ""
+
+  $end = (Get-Date).AddMinutes($Minutes)
+  while ((Get-Date) -lt $end) {
+    Write-Host ("  {0}   ~{1} min left    " -f (Get-Date -Format 'HH:mm:ss'), [int]($end - (Get-Date)).TotalMinutes) -NoNewline
+    Write-Host "`r" -NoNewline
+    # sleep in 1s slices so a keypress is noticed quickly
+    for ($i = 0; $i -lt 15; $i++) {
+      if ($canReadKey -and [Console]::KeyAvailable) {
+        [void][Console]::ReadKey($true); $stoppedEarly = $true; break
+      }
+      Start-Sleep -Seconds 1
+    }
+    if ($stoppedEarly) { break }
+  }
+}
+finally {
+  # Runs even on Ctrl+C, so pktmon is never left capturing in the background.
+  if ($capturing) {
+    pktmon stop | Out-Null
+    pktmon filter remove | Out-Null
+  }
 }
 Write-Host ""
-pktmon stop | Out-Null
-pktmon filter remove | Out-Null
-Write-Host "Decoding (this can take a minute on a long capture) ..."
+if ($stoppedEarly) { Write-Host "Stopped early on keypress." -ForegroundColor DarkGray }
+Write-Host "Decoding (this can take a minute) ..."
 pktmon format $etl -o $txt | Out-Null
 
 # ---------------- parse ----------------
@@ -135,11 +181,11 @@ while (($line = $sr.ReadLine()) -ne $null) {
 $sr.Close(); $fs.Close()
 
 # ---------------- report ----------------
-Write-Host ""
-Write-Host "=== Game flows in time order (>=200 samples) ===" -ForegroundColor Cyan
-Write-Host ""
-"{0,-16} {1,-6} {2,-9} {3,-9} {4,9}  {5,-8} {6,-8} {7}" -f 'REMOTE IP','PORT','FIRST','LAST','SAMPLES','PORT-OK','IN-LIST','MATCHED CIDR'
-"-" * 112
+Say ""
+Say "=== Game flows in time order (>=200 samples) ===" Cyan
+Say ""
+Say ("{0,-16} {1,-6} {2,-9} {3,-9} {4,9}  {5,-8} {6,-8} {7}" -f 'REMOTE IP','PORT','FIRST','LAST','SAMPLES','PORT-OK','IN-LIST','MATCHED CIDR')
+Say ("-" * 112)
 $rows = @()
 foreach ($k in $flow.Keys) {
   if ($flow[$k].n -lt 200) { continue }
@@ -150,32 +196,41 @@ $bad = @()
 foreach ($r in ($rows | Sort-Object First)) {
   $portOk = ($r.Port -ge $PortLow -and $r.Port -le $PortHigh)
   $cidr = Get-Cidr $r.Ip
-  "{0,-16} {1,-6} {2,-9} {3,-9} {4,9}  {5,-8} {6,-8} {7}" -f `
+  Say ("{0,-16} {1,-6} {2,-9} {3,-9} {4,9}  {5,-8} {6,-8} {7}" -f `
     $r.Ip, $r.Port, ($r.First -split ' ')[1], ($r.Last -split ' ')[1], $r.N,
-    $(if($portOk){'yes'}else{'NO'}), $(if($cidr){'yes'}else{'NO'}), $(if($cidr){$cidr}else{'-- not in list --'})
+    $(if($portOk){'yes'}else{'NO'}), $(if($cidr){'yes'}else{'NO'}), $(if($cidr){$cidr}else{'-- not in list --'}))
   if (-not $portOk -or -not $cidr) { $bad += ,$r }
 }
 
-Write-Host ""
+Say ""
 if ($rows.Count -eq 0) {
-  Write-Host "No game flows seen. Was a match actually running during the capture?" -ForegroundColor Yellow
+  Say "No game flows seen. Was a match actually running during the capture?" Yellow
 } elseif ($bad.Count -gt 0) {
-  Write-Host "=== VERDICT: some servers were NOT covered ===" -ForegroundColor Red
+  Say "=== VERDICT: some servers were NOT covered ===" Red
   foreach ($r in $bad) {
     $why = @()
     if ($r.Port -lt $PortLow -or $r.Port -gt $PortHigh) { $why += "port $($r.Port) outside $PortLow-$PortHigh" }
     if (-not (Get-Cidr $r.Ip)) { $why += "IP $($r.Ip) not in the CIDR list" }
-    "  $($r.Ip):$($r.Port)  first seen $($r.First)  ->  $($why -join '; ')"
+    Say ("  $($r.Ip):$($r.Port)  first seen $($r.First)  ->  $($why -join '; ')")
   }
-  Write-Host ""
-  Write-Host "  If the IP is missing: refresh the list (AWS adds ranges constantly)," -ForegroundColor Yellow
-  Write-Host "  or that game simply is not hosted on AWS." -ForegroundColor Yellow
+  Say ""
+  Say "  If the IP is missing: refresh the list (AWS adds ranges constantly)," Yellow
+  Say "  or that game simply is not hosted on AWS." Yellow
 } else {
-  Write-Host "=== VERDICT: every game flow was covered ===" -ForegroundColor Green
-  Write-Host "  Scope is fine, so look at your bypass strategy instead."
-  Write-Host "  For zapret, a common culprit is --dpi-desync-cutoff=n2: it only treats"
-  Write-Host "  the first 2 packets of a flow, leaving the rest of the match unprotected."
+  Say "=== VERDICT: every game flow was covered ===" Green
+  Say "  Scope is fine, so look at your bypass strategy instead."
+  Say "  For zapret, a common culprit is --dpi-desync-cutoff=n2: it only treats"
+  Say "  the first 2 packets of a flow, leaving the rest of the match unprotected."
 }
+Say ""
+Say "Compare the FIRST/LAST times above with when you got kicked."
+
+$report | Set-Content $reportF -Encoding UTF8
 Write-Host ""
-Write-Host "Compare the FIRST/LAST times above with when you got kicked."
-Write-Host "Raw decode kept at: $txt"
+Write-Host "Report saved to: $reportF" -ForegroundColor Cyan
+if ($KeepRaw) {
+  Write-Host "Raw decode kept at: $txt"
+} else {
+  Remove-Item -LiteralPath $txt -Force -ErrorAction SilentlyContinue
+  Write-Host "Raw decode deleted (it is large). Pass -KeepRaw to keep it."
+}
