@@ -59,8 +59,16 @@ if ($all.Count -lt 3000) {
 }
 
 $prev = if (Test-Path $out) { (Get-Content $out).Count } else { 0 }
-# ASCII, no BOM - a BOM breaks the first line for zapret and most parsers
-($all | Sort-Object) | Set-Content $out -Encoding ASCII
+
+# Ordinal sort, not Sort-Object: Sort-Object is culture-aware, so the same input
+# can order differently on another machine and produce a bogus 6000-line diff.
+$sorted = [string[]]@($all)
+[Array]::Sort($sorted, [StringComparer]::Ordinal)
+
+# Written with explicit LF and no BOM, so a run on Windows and a run on a Linux
+# CI runner produce a byte-identical file. A BOM would also break the first line
+# for zapret and most parsers.
+[System.IO.File]::WriteAllText($out, (($sorted -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
 
 Write-Host ""
 foreach ($s in $wanted) { "  {0,-20} {1,6}" -f $s, $per[$s] }

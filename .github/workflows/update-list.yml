@@ -1,0 +1,46 @@
+name: Update AWS CIDR list
+
+on:
+  schedule:
+    # Mondays 04:17 UTC. Odd minute on purpose - GitHub delays jobs scheduled
+    # on the hour, when everyone else's cron fires.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-list
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Regenerate the list
+        shell: pwsh
+        # The script exits 1 if it parses implausibly few prefixes, which fails
+        # the job on purpose - better a red run than a truncated list shipped
+        # to everyone consuming the raw URL.
+        run: ./scripts/update-list.ps1
+
+      - name: Commit if changed
+        run: |
+          if git diff --quiet -- results/cidr_ipv4.txt; then
+            echo "No change in AWS ranges."
+            exit 0
+          fi
+
+          count=$(grep -c . results/cidr_ipv4.txt)
+          added=$(git diff --numstat -- results/cidr_ipv4.txt | awk '{print $1}')
+          removed=$(git diff --numstat -- results/cidr_ipv4.txt | awk '{print $2}')
+          echo "Changed: +$added / -$removed, now $count prefixes"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add results/cidr_ipv4.txt
+          git commit -m "Update AWS CIDR list: $count prefixes (+$added/-$removed)"
+          git push

@@ -1,0 +1,10 @@
+# Keep everything LF in the repo and in the working tree.
+# The list is regenerated both locally on Windows and by CI on Linux; without
+# this, one side commits CRLF and the other LF, and every run looks like a
+# 6000-line rewrite. PowerShell reads LF scripts fine on Windows.
+* text=auto eol=lf
+
+results/cidr_ipv4.txt text eol=lf
+*.ps1 text eol=lf
+*.md  text eol=lf
+*.yml text eol=lf
